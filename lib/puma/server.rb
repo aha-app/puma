@@ -400,6 +400,10 @@ module Puma
                     end
                   else
                     pool.wait_until_not_full
+
+                    # A stop may have arrived while we waited for capacity.
+                    # Process it before accepting another connection.
+                    break if IO.select([check], nil, nil, 0) && handle_check
                   end
                 end
 

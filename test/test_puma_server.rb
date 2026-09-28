@@ -1911,6 +1911,51 @@ class TestPumaServer < PumaTest
     test_drain_on_shutdown false
   end
 
+  def test_shutdown_during_admission_wait(drain=false)
+    started = Queue.new
+    release = Queue.new
+    admission_wait = Queue.new
+    requests = []
+
+    server_run(queue_requests: false, drain_on_shutdown: drain, max_threads: 1) do |env|
+      requests << env['PATH_INFO']
+      if env['PATH_INFO'] == '/first'
+        started << true
+        release.pop
+      end
+      [200, {}, ['DONE']]
+    end
+
+    first = send_http "GET /first HTTP/1.0\r\n\r\n"
+    started.pop
+    wait_until_not_full = @pool.method(:wait_until_not_full)
+
+    # Observe entry into the gate without changing its capacity checks.
+    @pool.stub(:wait_until_not_full, -> {
+      admission_wait << true
+      wait_until_not_full.call
+    }) do
+      pending = send_http "GET /pending HTTP/1.0\r\n\r\n"
+      admission_wait.pop
+
+      # STOP must be pending before the first request releases capacity.
+      @server.stop
+      release.close
+      assert @server.thread.join(5), 'server did not finish shutting down'
+
+      assert_equal 'DONE', first.read_body
+      assert_equal 'DONE', pending.read_body if drain
+      assert_equal drain ? ['/first', '/pending'] : ['/first'], requests
+      assert_empty @log_writer.stderr.string
+    end
+  ensure
+    release&.close
+  end
+
+  def test_drain_during_admission_wait
+    test_shutdown_during_admission_wait true
+  end
+
   def test_remote_address_header
     server_run(remote_address: :header, remote_address_header: 'HTTP_X_REMOTE_IP') do |env|
       [200, {}, [env['REMOTE_ADDR']]]
